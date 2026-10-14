@@ -1,0 +1,68 @@
+name: Build Modded 1XBET
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Download apktool
+        run: |
+          wget -q https://github.com/iBotPeaches/Apktool/releases/download/v2.9.3/apktool_2.9.3.jar -O apktool.jar
+          ls -la apktool.jar
+
+      - name: Decompile base.apk
+        run: |
+          java -jar apktool.jar d base.apk -o base_decoded -f
+          ls -la base_decoded/ | head -20
+
+      - name: Apply patch (merge splits + inject Frida)
+        run: |
+          python3 patch.py
+
+      - name: Rebuild APK
+        run: |
+          java -jar apktool.jar b base_decoded -o 1xbet_modded_unsigned.apk -f
+
+      - name: Verify APK built
+        run: |
+          ls -la 1xbet_modded_unsigned.apk
+
+      - name: Sign APK
+        run: |
+          BUILD_TOOLS=$(ls $ANDROID_HOME/build-tools/ | tail -1)
+          echo "Using build-tools: $BUILD_TOOLS"
+          
+          $ANDROID_HOME/build-tools/$BUILD_TOOLS/zipalign -v 4 \
+            1xbet_modded_unsigned.apk 1xbet_modded_aligned.apk
+          
+          $ANDROID_HOME/build-tools/$BUILD_TOOLS/apksigner sign \
+            --ks keys/shadow.keystore \
+            --ks-key-alias shadow \
+            --ks-pass pass:shadow123 \
+            --key-pass pass:shadow123 \
+            --out 1xbet_modded_signed.apk \
+            1xbet_modded_aligned.apk
+          
+          $ANDROID_HOME/build-tools/$BUILD_TOOLS/apksigner verify --print-certs \
+            1xbet_modded_signed.apk
+
+      - name: Upload signed APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: 1xbet-modded-signed
+          path: 1xbet_modded_signed.apk
+          retention-days: 30
