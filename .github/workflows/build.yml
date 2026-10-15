@@ -5,6 +5,9 @@ on:
     branches: [ main, master ]
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -29,26 +32,17 @@ jobs:
           java -jar apktool.jar d base.apk -o base_decoded -f
           ls -la base_decoded/ | head -20
 
-      - name: Apply patch (merge splits + inject Frida)
-        run: |
-          python3 patch.py
+      - name: Apply patch
+        run: python3 patch.py
 
       - name: Rebuild APK
-        run: |
-          java -jar apktool.jar b base_decoded -o 1xbet_modded_unsigned.apk -f
-
-      - name: Verify APK built
-        run: |
-          ls -la 1xbet_modded_unsigned.apk
+        run: java -jar apktool.jar b base_decoded -o 1xbet_modded_unsigned.apk -f
 
       - name: Sign APK
         run: |
           BUILD_TOOLS=$(ls $ANDROID_HOME/build-tools/ | tail -1)
-          echo "Using build-tools: $BUILD_TOOLS"
-          
           $ANDROID_HOME/build-tools/$BUILD_TOOLS/zipalign -v 4 \
             1xbet_modded_unsigned.apk 1xbet_modded_aligned.apk
-          
           $ANDROID_HOME/build-tools/$BUILD_TOOLS/apksigner sign \
             --ks keys/shadow.keystore \
             --ks-key-alias shadow \
@@ -56,13 +50,25 @@ jobs:
             --key-pass pass:shadow123 \
             --out 1xbet_modded_signed.apk \
             1xbet_modded_aligned.apk
-          
           $ANDROID_HOME/build-tools/$BUILD_TOOLS/apksigner verify --print-certs \
             1xbet_modded_signed.apk
 
-      - name: Upload signed APK
-        uses: actions/upload-artifact@v4
+      - name: Get timestamp
+        id: timestamp
+        run: echo "ts=$(date +'%Y%m%d-%H%M%S')" >> $GITHUB_OUTPUT
+
+      - name: Create Release with APK
+        uses: softprops/action-gh-release@v2
         with:
-          name: 1xbet-modded-signed
-          path: 1xbet_modded_signed.apk
-          retention-days: 30
+          tag_name: build-${{ steps.timestamp.outputs.ts }}
+          name: "1XBET Mod ${{ steps.timestamp.outputs.ts }}"
+          body: |
+            Auto-built 1XBET with Frida Gadget injected.
+            
+            **Install:**
+            1. Uninstall original 1XBET
+            2. Download `1xbet_modded_signed.apk`
+            3. Tap to install
+          files: 1xbet_modded_signed.apk
+          draft: false
+          prerelease: false

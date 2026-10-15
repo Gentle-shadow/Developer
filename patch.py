@@ -41,13 +41,64 @@ def copy_frida_files():
                 target_assets / "libfrida-gadget.config.so")
 
 
+def fix_manifest():
+    """
+    Remove ALL split-APK-related declarations from AndroidManifest.xml
+    so it installs as a standalone APK.
+    """
+    log("Fixing AndroidManifest.xml (removing split declarations)...")
+
+    manifest = DECODED / "AndroidManifest.xml"
+    if not manifest.exists():
+        log("  ❌ AndroidManifest.xml not found")
+        return False
+
+    content = manifest.read_text()
+    original = content
+
+    # Remove split-related attributes
+    content = re.sub(r'\s+android:isSplit="[^"]*"', '', content)
+    content = re.sub(r'\s+android:splitName="[^"]*"', '', content)
+    content = re.sub(r'\s+android:isolatedSplits="[^"]*"', '', content)
+
+    # Remove split <meta-data> entries
+    content = re.sub(
+        r'<meta-data[^>]*android:name="com\.android\.vending\.splits[^"]*"[^/]*/>',
+        '', content
+    )
+    content = re.sub(
+        r'<meta-data[^>]*android:name="com\.android\.vending\.splits[^"]*"[^>]*>\s*</meta-data>',
+        '', content
+    )
+
+    # Remove <uses-split> tags
+    content = re.sub(
+        r'<uses-split[^>]*/>',
+        '', content
+    )
+
+    # Remove "split" attributes in <manifest> tag
+    content = re.sub(
+        r'<manifest[^>]*android:splitTypes="[^"]*"',
+        lambda m: m.group(0).replace(f'android:splitTypes="{re.search(chr(34) + "([^" + chr(34) + "]*)" + chr(34), m.group(0)).group(1)}"', ''),
+        content
+    )
+
+    if content != original:
+        manifest.write_text(content)
+        log(f"  ✅ Removed split declarations ({len(original) - len(content)} bytes)")
+    else:
+        log("  No split declarations found — checking manually")
+
+    # Show the <manifest> and <application> opening tags for verification
+    log("  Manifest head:")
+    for line in content.split('\n')[:5]:
+        log(f"    {line[:120]}")
+
+    return True
+
+
 def patch_application_smali():
-    """
-    Insert a NEW standalone static method that loads Frida.
-    Call it from onCreate using an existing register (v0).
-    
-    This avoids touching .locals of onCreate entirely.
-    """
     log("Patching ApplicationLoader.smali...")
 
     smali_file = None
@@ -67,7 +118,6 @@ def patch_application_smali():
         log("  Already patched")
         return True
 
-    # ─── Step 1: Add a new static helper method BEFORE onCreate ───
     helper_method = '''
 .method public static shadowLoadFrida()V
     .locals 2
@@ -91,22 +141,16 @@ def patch_application_smali():
 
 '''
 
-    # Find onCreate and insert helper before it
     pattern = r'(\.method public final onCreate\(\)V)'
     match = re.search(pattern, content)
-
     if not match:
         log("  ❌ onCreate not found")
         return False
 
-    # Insert helper method BEFORE onCreate
     content = content[:match.start()] + helper_method + content[match.start():]
 
-    # ─── Step 2: Call shadowLoadFrida() at start of onCreate ───
-    # Find onCreate and after .locals line, insert call
     pattern2 = r'(\.method public final onCreate\(\)V\s*\n\s*\.locals \d+)'
     match2 = re.search(pattern2, content)
-
     if not match2:
         log("  ❌ Could not re-find onCreate")
         return False
@@ -117,21 +161,21 @@ def patch_application_smali():
 '''
 
     content = content[:match2.end()] + call_code + content[match2.end():]
-
     smali_file.write_text(content)
-    log("  ✅ Patched with static helper method")
+    log("  ✅ Patched with static helper")
     return True
 
 
 def main():
     log("=" * 60)
-    log("  SHADOW CLONER — 1XBET Patch v3")
+    log("  SHADOW CLONER — 1XBET Patch v4")
     log("=" * 60)
     if not DECODED.exists():
         return 1
     try:
         extract_split_libs()
         copy_frida_files()
+        fix_manifest()
         if not patch_application_smali():
             return 1
     except Exception as e:
