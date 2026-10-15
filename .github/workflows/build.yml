@@ -25,33 +25,102 @@ jobs:
       - name: Download apktool
         run: |
           wget -q https://github.com/iBotPeaches/Apktool/releases/download/v2.9.3/apktool_2.9.3.jar -O apktool.jar
-          ls -la apktool.jar
 
       - name: Decompile base.apk
         run: |
           java -jar apktool.jar d base.apk -o base_decoded -f
+          echo "═══════ DECODED ═══════"
           ls -la base_decoded/ | head -20
 
       - name: Apply patch
-        run: python3 patch.py
+        run: |
+          python3 patch.py
+          echo "═══════ AFTER PATCH ═══════"
+          grep -c "shadowLoadFrida" base_decoded/smali_classes*/org/platform/app/ApplicationLoader.smali 2>/dev/null || echo "0 (patch may have failed)"
+          echo "Manifest head:"
+          head -3 base_decoded/AndroidManifest.xml
 
       - name: Rebuild APK
-        run: java -jar apktool.jar b base_decoded -o 1xbet_modded_unsigned.apk -f
+        run: |
+          java -jar apktool.jar b base_decoded -o 1xbet_modded_unsigned.apk -f
 
       - name: Sign APK
         run: |
           BUILD_TOOLS=$(ls $ANDROID_HOME/build-tools/ | tail -1)
-          $ANDROID_HOME/build-tools/$BUILD_TOOLS/zipalign -v 4 \
-            1xbet_modded_unsigned.apk 1xbet_modded_aligned.apk
-          $ANDROID_HOME/build-tools/$BUILD_TOOLS/apksigner sign \
+          BT="$ANDROID_HOME/build-tools/$BUILD_TOOLS"
+          $BT/zipalign -v 4 1xbet_modded_unsigned.apk 1xbet_modded_aligned.apk
+          $BT/apksigner sign \
             --ks keys/shadow.keystore \
             --ks-key-alias shadow \
             --ks-pass pass:shadow123 \
             --key-pass pass:shadow123 \
             --out 1xbet_modded_signed.apk \
             1xbet_modded_aligned.apk
-          $ANDROID_HOME/build-tools/$BUILD_TOOLS/apksigner verify --print-certs \
-            1xbet_modded_signed.apk
+
+      - name: VERIFY APK — Full Diagnostics
+        run: |
+          BUILD_TOOLS=$(ls $ANDROID_HOME/build-tools/ | tail -1)
+          BT="$ANDROID_HOME/build-tools/$BUILD_TOOLS"
+          APK=1xbet_modded_signed.apk
+
+          echo "═══════════════════════════════════════════════"
+          echo "  1. FILE INFO"
+          echo "═══════════════════════════════════════════════"
+          ls -la $APK
+          file $APK
+
+          echo ""
+          echo "═══════════════════════════════════════════════"
+          echo "  2. SIGNATURE VERIFICATION"
+          echo "═══════════════════════════════════════════════"
+          $BT/apksigner verify --print-certs $APK 2>&1 | head -15
+
+          echo ""
+          echo "═══════════════════════════════════════════════"
+          echo "  3. BADGING INFO (package, splits, sdk)"
+          echo "═══════════════════════════════════════════════"
+          $BT/aapt2 dump badging $APK 2>&1 | head -20
+
+          echo ""
+          echo "═══════════════════════════════════════════════"
+          echo "  4. MANIFEST — CHECK SPLIT DECLARATIONS"
+          echo "═══════════════════════════════════════════════"
+          $BT/aapt2 dump xmltree $APK --file AndroidManifest.xml 2>&1 | grep -iE "isSplit|splitName|isolatedSplits|extractNativeLibs" | head -10 || echo "No split declarations found — GOOD"
+
+          echo ""
+          echo "═══════════════════════════════════════════════"
+          echo "  5. DEX FILES"
+          echo "═══════════════════════════════════════════════"
+          unzip -l $APK | grep "classes.*dex"
+
+          echo ""
+          echo "═══════════════════════════════════════════════"
+          echo "  6. NATIVE LIBS"
+          echo "═══════════════════════════════════════════════"
+          unzip -l $APK | grep "lib/"
+
+          echo ""
+          echo "═══════════════════════════════════════════════"
+          echo "  7. FRIDA FILES"
+          echo "═══════════════════════════════════════════════"
+          unzip -l $APK | grep -i frida
+
+          echo ""
+          echo "═══════════════════════════════════════════════"
+          echo "  8. ZIP INTEGRITY"
+          echo "═══════════════════════════════════════════════"
+          unzip -t $APK 2>&1 | tail -3
+
+          echo ""
+          echo "═══════════════════════════════════════════════"
+          echo "  9. ZIPALIGN VERIFICATION"
+          echo "═══════════════════════════════════════════════"
+          $BT/zipalign -c -v 4 $APK 2>&1 | tail -5
+
+          echo ""
+          echo "═══════════════════════════════════════════════"
+          echo "  DIAGNOSTICS COMPLETE"
+          echo "═══════════════════════════════════════════════"
 
       - name: Get timestamp
         id: timestamp
@@ -64,11 +133,5 @@ jobs:
           name: "1XBET Mod ${{ steps.timestamp.outputs.ts }}"
           body: |
             Auto-built 1XBET with Frida Gadget injected.
-            
-            **Install:**
-            1. Uninstall original 1XBET
-            2. Download `1xbet_modded_signed.apk`
-            3. Tap to install
+            Diagnostics attached in Actions log.
           files: 1xbet_modded_signed.apk
-          draft: false
-          prerelease: false
