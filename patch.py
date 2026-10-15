@@ -42,6 +42,12 @@ def copy_frida_files():
 
 
 def patch_application_smali():
+    """
+    Insert a NEW standalone static method that loads Frida.
+    Call it from onCreate using an existing register (v0).
+    
+    This avoids touching .locals of onCreate entirely.
+    """
     log("Patching ApplicationLoader.smali...")
 
     smali_file = None
@@ -52,66 +58,74 @@ def patch_application_smali():
             break
 
     if not smali_file:
-        log("  ❌ ApplicationLoader.smali not found")
+        log("  ❌ Not found")
         return False
 
     content = smali_file.read_text()
 
-    if "SHADOW CLONER" in content:
+    if "shadowLoadFrida" in content:
         log("  Already patched")
         return True
 
-    # Match onCreate with original locals
-    pattern = r'(\.method public final onCreate\(\)V\s*\n\s*\.locals )(\d+)'
+    # ─── Step 1: Add a new static helper method BEFORE onCreate ───
+    helper_method = '''
+.method public static shadowLoadFrida()V
+    .locals 2
+    :try_start_shadow
+    const-string v0, "frida-gadget"
+    invoke-static {v0}, Ljava/lang/System;->loadLibrary(Ljava/lang/String;)V
+    const-string v0, "ShadowCloner"
+    const-string v1, "Frida loaded OK"
+    invoke-static {v0, v1}, Landroid/util/Log;->d(Ljava/lang/String;Ljava/lang/String;)I
+    :try_end_shadow
+    .catch Ljava/lang/Throwable; {:try_start_shadow .. :try_end_shadow} :catch_shadow
+    goto :goto_shadow_done
+    :catch_shadow
+    move-exception v0
+    const-string v0, "ShadowCloner"
+    const-string v1, "Frida load failed"
+    invoke-static {v0, v1}, Landroid/util/Log;->e(Ljava/lang/String;Ljava/lang/String;)I
+    :goto_shadow_done
+    return-void
+.end method
+
+'''
+
+    # Find onCreate and insert helper before it
+    pattern = r'(\.method public final onCreate\(\)V)'
     match = re.search(pattern, content)
 
     if not match:
         log("  ❌ onCreate not found")
         return False
 
-    original_locals = int(match.group(2))
-    log(f"  Original locals: {original_locals}")
+    # Insert helper method BEFORE onCreate
+    content = content[:match.start()] + helper_method + content[match.start():]
 
-    # Add 4 more registers — well above original
-    new_locals = original_locals + 4
-    log(f"  New locals: {new_locals}")
+    # ─── Step 2: Call shadowLoadFrida() at start of onCreate ───
+    # Find onCreate and after .locals line, insert call
+    pattern2 = r'(\.method public final onCreate\(\)V\s*\n\s*\.locals \d+)'
+    match2 = re.search(pattern2, content)
 
-    # Use HIGH registers (last 4 added) so we don't clash with original low registers
-    # If original locals was 15, new locals 19 gives v15, v16, v17, v18 as safe new registers
-    r1 = original_locals       # v15
-    r2 = original_locals + 1   # v16
-    r3 = original_locals + 2   # v17
+    if not match2:
+        log("  ❌ Could not re-find onCreate")
+        return False
 
-    inject = f'''
+    call_code = '''
     # ═══ SHADOW CLONER: Load Frida Gadget ═══
-    :try_start_shadow
-    const-string v{r1}, "frida-gadget"
-    invoke-static {{v{r1}}}, Ljava/lang/System;->loadLibrary(Ljava/lang/String;)V
-    :try_end_shadow
-    .catch Ljava/lang/Throwable; {{:try_start_shadow .. :try_end_shadow}} :catch_shadow
+    invoke-static {}, Lorg/platform/app/ApplicationLoader;->shadowLoadFrida()V
+'''
 
-    goto :goto_shadow_done
+    content = content[:match2.end()] + call_code + content[match2.end():]
 
-    :catch_shadow
-    move-exception v{r1}
-    const-string v{r2}, "ShadowCloner"
-    const-string v{r3}, "Frida load failed"
-
-    :goto_shadow_done'''
-
-    # Replace the .locals line and insert our injection right after
-    old_header = match.group(0)
-    new_header = f'.method public final onCreate()V\n    .locals {new_locals}'
-
-    content = content.replace(old_header, new_header + inject, 1)
     smali_file.write_text(content)
-    log("  ✅ Patched")
+    log("  ✅ Patched with static helper method")
     return True
 
 
 def main():
     log("=" * 60)
-    log("  SHADOW CLONER — 1XBET Patch")
+    log("  SHADOW CLONER — 1XBET Patch v3")
     log("=" * 60)
     if not DECODED.exists():
         return 1
