@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+"""
+patch.py — Frida injection + complete split removal.
+"""
 
 import os
 import shutil
@@ -15,7 +18,7 @@ def log(msg):
 
 
 def extract_split_libs():
-    log("Extracting native libs...")
+    log("Extracting native libs from split...")
     target = DECODED / "lib" / "armeabi-v7a"
     target.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile("split_config.armeabi_v7a.apk", "r") as zf:
@@ -43,10 +46,20 @@ def copy_frida_files():
 
 def fix_manifest():
     """
-    Remove ALL split-APK-related declarations from AndroidManifest.xml
-    so it installs as a standalone APK.
+    Remove ALL split-APK-related attributes from AndroidManifest.xml.
+
+    Critical attributes to remove:
+    - android:isSplit="true"
+    - android:isSplitRequired="true"  ← THE ONE CAUSING OUR ERROR
+    - android:splitName="..."
+    - android:isolatedSplits="true"
+    - android:requiredSplitTypes="..."
+    - android:splitTypes="..."
+
+    Also handle extractNativeLibs:
+    - Set android:extractNativeLibs="true" so Android extracts our Frida .so
     """
-    log("Fixing AndroidManifest.xml (removing split declarations)...")
+    log("Fixing AndroidManifest.xml...")
 
     manifest = DECODED / "AndroidManifest.xml"
     if not manifest.exists():
@@ -56,12 +69,23 @@ def fix_manifest():
     content = manifest.read_text()
     original = content
 
-    # Remove split-related attributes
-    content = re.sub(r'\s+android:isSplit="[^"]*"', '', content)
-    content = re.sub(r'\s+android:splitName="[^"]*"', '', content)
-    content = re.sub(r'\s+android:isolatedSplits="[^"]*"', '', content)
+    # ─── Remove split attributes ───
+    patterns_to_remove = [
+        r'\s+android:isSplitRequired="[^"]*"',
+        r'\s+android:isSplit="[^"]*"',
+        r'\s+android:splitName="[^"]*"',
+        r'\s+android:isolatedSplits="[^"]*"',
+        r'\s+android:requiredSplitTypes="[^"]*"',
+        r'\s+android:splitTypes="[^"]*"',
+    ]
+    for pat in patterns_to_remove:
+        content = re.sub(pat, '', content)
 
-    # Remove split <meta-data> entries
+    # ─── Remove <uses-split> tags ───
+    content = re.sub(r'<uses-split[^/]*/>', '', content)
+    content = re.sub(r'<uses-split[^>]*>\s*</uses-split>', '', content)
+
+    # ─── Remove split-related <meta-data> ───
     content = re.sub(
         r'<meta-data[^>]*android:name="com\.android\.vending\.splits[^"]*"[^/]*/>',
         '', content
@@ -70,30 +94,40 @@ def fix_manifest():
         r'<meta-data[^>]*android:name="com\.android\.vending\.splits[^"]*"[^>]*>\s*</meta-data>',
         '', content
     )
-
-    # Remove <uses-split> tags
     content = re.sub(
-        r'<uses-split[^>]*/>',
+        r'<meta-data[^>]*android:name="com\.android\.vending\.derived_apk[^"]*"[^/]*/>',
         '', content
     )
 
-    # Remove "split" attributes in <manifest> tag
-    content = re.sub(
-        r'<manifest[^>]*android:splitTypes="[^"]*"',
-        lambda m: m.group(0).replace(f'android:splitTypes="{re.search(chr(34) + "([^" + chr(34) + "]*)" + chr(34), m.group(0)).group(1)}"', ''),
-        content
-    )
+    # ─── CRITICAL: Set extractNativeLibs="true" ───
+    # This is required so Android extracts libfrida-gadget.so at install time
+    if 'android:extractNativeLibs="false"' in content:
+        content = content.replace(
+            'android:extractNativeLibs="false"',
+            'android:extractNativeLibs="true"'
+        )
+        log("  ✅ Changed extractNativeLibs to true")
+    elif 'android:extractNativeLibs="true"' not in content:
+        # Add it if not present
+        content = re.sub(
+            r'(<application\s)',
+            r'\1android:extractNativeLibs="true" ',
+            content,
+            count=1
+        )
+        log("  ✅ Added extractNativeLibs=true")
 
     if content != original:
         manifest.write_text(content)
-        log(f"  ✅ Removed split declarations ({len(original) - len(content)} bytes)")
+        log(f"  ✅ Manifest fixed ({len(original) - len(content)} bytes removed)")
     else:
-        log("  No split declarations found — checking manually")
+        log("  ⚠️  No changes made to manifest")
 
-    # Show the <manifest> and <application> opening tags for verification
-    log("  Manifest head:")
-    for line in content.split('\n')[:5]:
-        log(f"    {line[:120]}")
+    # Verify our fixes
+    log("  Verification:")
+    for term in ["isSplitRequired", "isSplit=", "splitName", "extractNativeLibs"]:
+        count = content.count(term)
+        log(f"    {term}: {count} occurrence(s)")
 
     return True
 
@@ -168,7 +202,7 @@ def patch_application_smali():
 
 def main():
     log("=" * 60)
-    log("  SHADOW CLONER — 1XBET Patch v4")
+    log("  SHADOW CLONER — 1XBET Patch v5")
     log("=" * 60)
     if not DECODED.exists():
         return 1
