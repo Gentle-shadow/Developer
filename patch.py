@@ -132,6 +132,34 @@ def fix_manifest():
     return True
 
 
+
+def fix_sdk_versions():
+    """Lower target/compile SDK to match phone's Android version."""
+    log("Fixing SDK versions in apktool.yml...")
+
+    apktool_yml = DECODED / "apktool.yml"
+    if not apktool_yml.exists():
+        log("  ❌ apktool.yml not found")
+        return False
+
+    content = apktool_yml.read_text()
+    original = content
+
+    # Set minSdk to 30 (Android 11) and targetSdk to 34 (Android 14)
+    content = re.sub(r'minSdkVersion: \d+', 'minSdkVersion: 30', content)
+    content = re.sub(r'targetSdkVersion: \d+', 'targetSdkVersion: 34', content)
+
+    if content != original:
+        apktool_yml.write_text(content)
+        log("  ✅ SDK versions updated")
+
+    # Show result
+    for line in content.split('\n'):
+        if 'Sdk' in line:
+            log(f"    {line}")
+    return True
+
+
 def patch_application_smali():
     log("Patching ApplicationLoader.smali...")
 
@@ -210,6 +238,7 @@ def main():
         extract_split_libs()
         copy_frida_files()
         fix_manifest()
+        fix_sdk_versions()
         if not patch_application_smali():
             return 1
     except Exception as e:
