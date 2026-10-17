@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-patch.py — In-place APK patch, no resource rebuild.
+patch.py — In-place APK patch using standalone smali.jar (reliable).
 """
 import os
 import shutil
@@ -79,17 +79,27 @@ def patch_application_smali():
 
     content = content[:match2.end()] + call_code + content[match2.end():]
     smali_file.write_text(content)
-    log("  ✅ Patched with static helper")
+    log("  ✅ Patched ApplicationLoader.smali")
     return True
 
 
-def compile_smali_to_dex():
-    log("Compiling smali_classes3 → classes3.dex...")
-    dex_out = Path("classes3_patched.dex")
+def find_smali_dir_with_patch():
+    """Find which smali_classesN folder has our patched ApplicationLoader."""
+    for smali_dir in DECODED.glob("smali*"):
+        candidate = smali_dir / "org" / "platform" / "app" / "ApplicationLoader.smali"
+        if candidate.exists() and "shadowLoadFrida" in candidate.read_text():
+            return smali_dir
+    return None
+
+
+def compile_smali_to_dex(smali_dir):
+    """Compile using standalone smali.jar."""
+    log(f"Compiling {smali_dir} → patched.dex using smali.jar...")
+    dex_out = Path("patched_classes.dex")
+
     result = subprocess.run([
-        "java", "-cp", "apktool.jar",
-        "com.android.tools.smali.smali.Main",
-        "assemble", "base_decoded/smali_classes3",
+        "java", "-jar", "smali.jar",
+        "assemble", str(smali_dir),
         "-o", str(dex_out)
     ], capture_output=True, text=True)
 
@@ -98,20 +108,31 @@ def compile_smali_to_dex():
         log(result.stderr[:1000])
         return None
 
-    log(f"  ✅ Created classes3_patched.dex ({dex_out.stat().st_size} bytes)")
+    log(f"  ✅ Created {dex_out.name} ({dex_out.stat().st_size} bytes)")
     return dex_out
 
 
-def inject_into_apk(dex_file):
-    log("Injecting into original base.apk...")
+def determine_dex_name(smali_dir):
+    """Figure out the dex name based on the smali folder name."""
+    name = smali_dir.name  # e.g., "smali_classes3" or "smali"
+    if name == "smali":
+        return "classes.dex"
+    elif name.startswith("smali_classes"):
+        num = name.replace("smali_classes", "")
+        return f"classes{num}.dex"
+    return "classes.dex"
+
+
+def inject_into_apk(dex_file, dex_name):
+    log(f"Injecting {dex_name} + Frida into original base.apk...")
     shutil.copy("base.apk", "1xbet_patched.apk")
 
     with zipfile.ZipFile("1xbet_patched.apk", "a") as zf:
-        # 1. Replace classes3.dex
-        log("  Adding classes3.dex...")
+        # 1. Replace the target classesN.dex
+        log(f"  Replacing {dex_name}...")
         with open(dex_file, "rb") as f:
             dex_data = f.read()
-        zf.writestr("classes3.dex", dex_data)
+        zf.writestr(dex_name, dex_data)
 
         # 2. Add Frida gadget
         log("  Adding libfrida-gadget.so...")
@@ -123,13 +144,16 @@ def inject_into_apk(dex_file):
         zf.write(FRIDA / "libfrida-gadget.config.so", "assets/libfrida-gadget.config.so")
 
         # 4. Add split native libs
-        log("  Adding split libs...")
+        log("  Adding split native libs...")
         with zipfile.ZipFile("split_config.armeabi_v7a.apk") as split:
             for entry in split.namelist():
                 if entry.startswith("lib/"):
-                    with split.open(entry) as src:
-                        zf.writestr(entry, src.read())
-                    log(f"    → {entry}")
+                    try:
+                        with split.open(entry) as src:
+                            zf.writestr(entry, src.read())
+                        log(f"    → {entry}")
+                    except Exception as e:
+                        log(f"    ⚠️ {entry}: {e}")
 
     log(f"✅ APK created: 1xbet_patched.apk ({Path('1xbet_patched.apk').stat().st_size} bytes)")
     return True
@@ -137,22 +161,36 @@ def inject_into_apk(dex_file):
 
 def main():
     log("=" * 60)
-    log("  IN-PLACE APK PATCH (no resource rebuild)")
+    log("  IN-PLACE APK PATCH (standalone smali.jar)")
     log("=" * 60)
 
     if not DECODED.exists():
         log("❌ base_decoded not found")
         return 1
 
+    # Check smali.jar exists
+    if not Path("smali.jar").exists():
+        log("❌ smali.jar not found — download it first")
+        return 1
+
     try:
         if not patch_application_smali():
             return 1
 
-        dex_file = compile_smali_to_dex()
+        patched_smali_dir = find_smali_dir_with_patch()
+        if not patched_smali_dir:
+            log("❌ Could not find patched smali folder")
+            return 1
+
+        log(f"Found patched smali: {patched_smali_dir}")
+        dex_name = determine_dex_name(patched_smali_dir)
+        log(f"Target dex name: {dex_name}")
+
+        dex_file = compile_smali_to_dex(patched_smali_dir)
         if not dex_file:
             return 1
 
-        if not inject_into_apk(dex_file):
+        if not inject_into_apk(dex_file, dex_name):
             return 1
     except Exception as e:
         log(f"❌ {e}")

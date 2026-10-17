@@ -19,9 +19,11 @@ jobs:
           distribution: 'temurin'
           java-version: '17'
 
-      - name: Download apktool (for smali compile)
+      - name: Download tools
         run: |
           wget -q https://github.com/iBotPeaches/Apktool/releases/download/v2.9.3/apktool_2.9.3.jar -O apktool.jar
+          wget -q https://github.com/google/smali/releases/download/3.0.5/smali-3.0.5-fat.jar -O smali.jar
+          ls -la apktool.jar smali.jar
 
       - name: Decompile base.apk
         run: |
@@ -30,8 +32,7 @@ jobs:
           ls -la base_decoded/ | head -15
 
       - name: Apply in-place patch
-        run: |
-          python3 patch.py
+        run: python3 patch.py
 
       - name: Sign APK
         run: |
@@ -53,7 +54,7 @@ jobs:
           echo "═══ SIGNATURE ═══"
           $ANDROID_HOME/build-tools/$BT/apksigner verify --print-certs 1xbet_signed.apk 2>&1 | head -5
           echo "═══ CONTENTS ═══"
-          unzip -l 1xbet_signed.apk | grep -E "classes3|libfrida|frida_script" 
+          unzip -l 1xbet_signed.apk | grep -E "classes[0-9]*\.dex|libfrida|frida_script"
           echo "═══ ZIP INTEGRITY ═══"
           unzip -t 1xbet_signed.apk 2>&1 | tail -3
 
@@ -65,5 +66,5 @@ jobs:
         with:
           tag_name: inplace-${{ steps.t.outputs.ts }}
           name: "1XBET In-Place ${{ steps.t.outputs.ts }}"
-          body: "In-place patch — original resources, patched classes3.dex, Frida added"
+          body: "In-place patch — smali.jar compiled, original resources preserved"
           files: 1xbet_signed.apk
