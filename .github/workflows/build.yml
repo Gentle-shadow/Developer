@@ -28,11 +28,14 @@ jobs:
           wget -q --show-progress "https://github.com/iBotPeaches/Apktool/releases/download/v2.9.4/apktool_2.9.4.jar" -O apktool.jar || \
           { echo "❌ All download URLs failed"; exit 1; }
           
-          if ! file apktool.jar | grep -q "Java archive"; then
+          # ✅ FIXED: accept both Java and Zip archive
+          if ! file apktool.jar | grep -qE "Java archive|Zip archive"; then
               echo "❌ Downloaded file is not a valid JAR"
               file apktool.jar
               exit 1
           fi
+          
+          echo "✅ Download OK"
           java -jar apktool.jar --version
 
       - name: Download smali/baksmali
@@ -43,12 +46,13 @@ jobs:
           wget -q https://github.com/baksmali/smali/releases/download/v3.0.5/baksmali-3.0.5.jar -O baksmali.jar || \
           wget -q https://github.com/google/smali/releases/download/v3.0.5/baksmali-3.0.5.jar -O baksmali.jar
           
+          file smali.jar
+          file baksmali.jar
           java -jar smali.jar --version
           java -jar baksmali.jar --version
 
       - name: Decode APK (with splits)
         run: |
-          # Apktool v3 auto-detects split_config files in the same folder
           java -jar apktool.jar d base.apk -o base_decoded -f
           
           if [ ! -d "base_decoded/smali" ] && [ ! -d "base_decoded/smali_classes2" ]; then
@@ -65,14 +69,12 @@ jobs:
 
       - name: Zipalign
         run: |
-          # GitHub runners have Android SDK pre-installed
           ZIPALIGN=$(find $ANDROID_HOME/build-tools -name zipalign | sort -V | tail -n 1)
           echo "Using zipalign: $ZIPALIGN"
           $ZIPALIGN -f -p 4 1xbet_patched.apk 1xbet_aligned.apk
 
       - name: Sign APK
         run: |
-          # Generate key if not present
           if [ ! -f mod.keystore ]; then
               keytool -genkeypair -v \
                   -keystore mod.keystore \
@@ -82,7 +84,6 @@ jobs:
                   -dname "CN=Mod, OU=Mod, O=Mod, L=Mod, S=Mod, C=US"
           fi
           
-          # Sign
           apksigner sign \
               --ks mod.keystore \
               --ks-pass pass:modpass \
