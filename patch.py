@@ -1,36 +1,67 @@
 #!/usr/bin/env python3
 """
-patch.py — In-place APK patch using standalone smali.jar (reliable).
+patch.py — In-place APK patch. Uses apktool for rebuild to avoid smali.jar dependencies.
+Finds the real Application class from AndroidManifest.xml.
 """
 import os
 import shutil
 import subprocess
 import zipfile
 import re
+import xml.etree.ElementTree as ET
 from pathlib import Path
 
 DECODED = Path("base_decoded")
 FRIDA = Path("frida")
 
-
 def log(msg):
     print(f"[PATCH] {msg}", flush=True)
 
+def find_application_smali():
+    log("Reading AndroidManifest.xml to find Application class...")
+    manifest_path = DECODED / "AndroidManifest.xml"
+    if not manifest_path.exists():
+        log("  ❌ AndroidManifest.xml not found")
+        return None
 
-def patch_application_smali():
-    log("Patching ApplicationLoader.smali...")
-    smali_file = None
-    for smali_dir in DECODED.glob("smali*"):
-        candidate = smali_dir / "org" / "platform" / "app" / "ApplicationLoader.smali"
-        if candidate.exists():
-            smali_file = candidate
-            break
+    try:
+        tree = ET.parse(manifest_path)
+        root = tree.getroot()
+        android_ns = "{http://schemas.android.com/apk/res/android}"
+        
+        # Find <application> tag and get android:name
+        app_tag = root.find("application")
+        if app_tag is None:
+            log("  ❌ <application> tag not found")
+            return None
+            
+        app_class = app_tag.get(f"{android_ns}name")
+        if not app_class:
+            log("  ❌ No android:name in <application>")
+            return None
+            
+        log(f"  Found Application class: {app_class}")
+        
+        # Convert class name to smali path (e.g. org.platform.app.XbetApp -> org/platform/app/XbetApp.smali)
+        smali_rel_path = app_class.replace('.', '/') + ".smali"
+        
+        # Search for this file in all smali folders
+        for smali_dir in DECODED.glob("smali*"):
+            candidate = smali_dir / smali_rel_path
+            if candidate.exists():
+                log(f"  Found smali file: {candidate}")
+                return candidate
+                
+        log(f"  ❌ smali file not found for {app_class}")
+        return None
+    except Exception as e:
+        log(f"  ❌ Error parsing manifest: {e}")
+        return None
 
-    if not smali_file:
-        log("  ❌ Not found")
-        return False
-
+def patch_application_smali(smali_file):
+    log(f"Patching {smali_file.name}...")
     content = smali_file.read_text()
+    
     if "shadowLoadFrida" in content:
         log("  Already patched")
         return True
@@ -55,154 +86,107 @@ def patch_application_smali():
     :goto_shadow_done
     return-void
 .end method
-
 '''
 
-    pattern = r'(\.method public final onCreate\(\)V)'
-    match = re.search(pattern, content)
+    # Find onCreate (matches public, protected, final)
+    match = re.search(r'(\.method (?:public|protected)(?: final)? onCreate\(\)V)', content)
     if not match:
-        log("  ❌ onCreate not found")
+        log("  ❌ onCreate()V not found. Cannot inject load call.")
         return False
 
+    # Inject helper method BEFORE onCreate
     content = content[:match.start()] + helper_method + content[match.start():]
 
-    pattern2 = r'(\.method public final onCreate\(\)V\s*\n\s*\.locals \d+)'
-    match2 = re.search(pattern2, content)
+    # Now find onCreate again (after helper injection) and add the load call
+    match2 = re.search(r'(\.method (?:public|protected)(?: final)? onCreate\(\)V\s*\n\s*\.locals \d+)', content)
     if not match2:
         log("  ❌ Could not re-find onCreate")
         return False
 
     call_code = '''
     # SHADOW CLONER: Load Frida Gadget
-    invoke-static {}, Lorg/platform/app/ApplicationLoader;->shadowLoadFrida()V
+    invoke-static {}, Lshadow/Loader;->shadowLoadFrida()V
 '''
+    # Replace class name in the call with the actual class
+    actual_class_smali = smali_file.relative_to(DECODED).with_suffix('').as_posix().replace('/', '.')
+    call_code = call_code.replace("Lshadow/Loader;", f"L{actual_class_smali};")
 
     content = content[:match2.end()] + call_code + content[match2.end():]
     smali_file.write_text(content)
-    log("  ✅ Patched ApplicationLoader.smali")
+    log("  ✅ Patched successfully")
     return True
 
+def inject_into_apk():
+    log("Building patched APK from decoded sources...")
+    
+    if not (DECODED / "apktool.yml").exists():
+        log("  ❌ apktool.yml not found. Did decode fail?")
+        return False
 
-def find_smali_dir_with_patch():
-    """Find which smali_classesN folder has our patched ApplicationLoader."""
-    for smali_dir in DECODED.glob("smali*"):
-        candidate = smali_dir / "org" / "platform" / "app" / "ApplicationLoader.smali"
-        if candidate.exists() and "shadowLoadFrida" in candidate.read_text():
-            return smali_dir
-    return None
-
-
-def compile_smali_to_dex(smali_dir):
-    """Compile using standalone smali.jar."""
-    log(f"Compiling {smali_dir} → patched.dex using smali.jar...")
-    dex_out = Path("patched_classes.dex")
-
+    # Use apktool to rebuild (avoids smali.jar path issues)
+    log("  Running apktool b...")
     result = subprocess.run([
-        "java", "-jar", "smali.jar",
-        "assemble", str(smali_dir),
-        "-o", str(dex_out)
+        "java", "-jar", "apktool.jar", "b", str(DECODED), "-o", "shadow_patched.apk"
     ], capture_output=True, text=True)
-
+    
     if result.returncode != 0:
-        log(f"  ❌ Compile failed:")
-        log(result.stderr[:1000])
-        return None
-
-    log(f"  ✅ Created {dex_out.name} ({dex_out.stat().st_size} bytes)")
-    return dex_out
-
-
-def determine_dex_name(smali_dir):
-    """Figure out the dex name based on the smali folder name."""
-    name = smali_dir.name  # e.g., "smali_classes3" or "smali"
-    if name == "smali":
-        return "classes.dex"
-    elif name.startswith("smali_classes"):
-        num = name.replace("smali_classes", "")
-        return f"classes{num}.dex"
-    return "classes.dex"
-
-
-def inject_into_apk(dex_file, dex_name):
-    log(f"Injecting {dex_name} + Frida into original base.apk...")
-    shutil.copy("base.apk", "1xbet_patched.apk")
-
-    with zipfile.ZipFile("1xbet_patched.apk", "a") as zf:
-        # 1. Replace the target classesN.dex
-        log(f"  Replacing {dex_name}...")
-        with open(dex_file, "rb") as f:
-            dex_data = f.read()
-        zf.writestr(dex_name, dex_data)
-
-        # 2. Add Frida gadget
-        log("  Adding libfrida-gadget.so...")
-        zf.write(FRIDA / "libfrida-gadget.so", "lib/armeabi-v7a/libfrida-gadget.so")
-
-        # 3. Add Frida script + config
-        log("  Adding frida_script.js + config...")
-        zf.write(FRIDA / "frida_script.js", "assets/frida_script.js")
-        zf.write(FRIDA / "libfrida-gadget.config.so", "assets/libfrida-gadget.config.so")
-
-        # 4. Add split native libs
-        log("  Adding split native libs...")
-        with zipfile.ZipFile("split_config.armeabi_v7a.apk") as split:
-            for entry in split.namelist():
-                if entry.startswith("lib/"):
-                    try:
-                        with split.open(entry) as src:
-                            zf.writestr(entry, src.read())
-                        log(f"    → {entry}")
-                    except Exception as e:
-                        log(f"    ⚠️ {entry}: {e}")
-
-    log(f"✅ APK created: 1xbet_patched.apk ({Path('1xbet_patched.apk').stat().st_size} bytes)")
+        log(f"  ❌ apktool build failed:\n{result.stderr[:1000]}")
+        return False
+        
+    log("  ✅ APK rebuilt")
+    
+    # Now inject Frida files into the rebuilt APK
+    log("Injecting Frida Gadget and Script...")
+    temp_apk = Path("shadow_patched_frida.apk")
+    shutil.move("shadow_patched.apk", temp_apk)
+    
+    with zipfile.ZipFile(temp_apk, "r") as zin, zipfile.ZipFile("shadow_final_unsigned.apk", "w") as zout:
+        # Copy all original files, EXCEPT if they conflict with Frida files
+        for item in zin.infolist():
+            data = zin.read(item.filename)
+            zout.writestr(item, data)
+            
+        # Add Frida files
+        if (FRIDA / "libfrida-gadget.so").exists():
+            zout.write(FRIDA / "libfrida-gadget.so", "lib/armeabi-v7a/libfrida-gadget.so")
+            log("  Added libfrida-gadget.so")
+        
+        if (FRIDA / "frida_script.js").exists():
+            zout.write(FRIDA / "frida_script.js", "assets/frida_script.js")
+            log("  Added frida_script.js")
+            
+        if (FRIDA / "libfrida-gadget.config.so").exists():
+            zout.write(FRIDA / "libfrida-gadget.config.so", "assets/libfrida-gadget.config.so")
+            log("  Added libfrida-gadget.config.so")
+            
+    temp_apk.unlink()
+    shutil.move("shadow_final_unsigned.apk", "1xbet_patched.apk")
+    log("✅ APK created: 1xbet_patched.apk")
     return True
-
 
 def main():
     log("=" * 60)
-    log("  IN-PLACE APK PATCH (standalone smali.jar)")
+    log("  IN-PLACE APK PATCH (Bulletproof)")
     log("=" * 60)
 
     if not DECODED.exists():
         log("❌ base_decoded not found")
         return 1
 
-    # Check smali.jar exists
-    if not Path("smali.jar").exists():
-        log("❌ smali.jar not found — download it first")
+    smali_file = find_application_smali()
+    if not smali_file:
         return 1
-
-    try:
-        if not patch_application_smali():
-            return 1
-
-        patched_smali_dir = find_smali_dir_with_patch()
-        if not patched_smali_dir:
-            log("❌ Could not find patched smali folder")
-            return 1
-
-        log(f"Found patched smali: {patched_smali_dir}")
-        dex_name = determine_dex_name(patched_smali_dir)
-        log(f"Target dex name: {dex_name}")
-
-        dex_file = compile_smali_to_dex(patched_smali_dir)
-        if not dex_file:
-            return 1
-
-        if not inject_into_apk(dex_file, dex_name):
-            return 1
-    except Exception as e:
-        log(f"❌ {e}")
-        import traceback
-        traceback.print_exc()
+        
+    if not patch_application_smali(smali_file):
+        return 1
+        
+    if not inject_into_apk():
         return 1
 
     log("=" * 60)
     log("  ✅ PATCH COMPLETE")
     log("=" * 60)
     return 0
-
 
 if __name__ == "__main__":
     exit(main())

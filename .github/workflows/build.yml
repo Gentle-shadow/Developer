@@ -1,4 +1,4 @@
-name: In-Place 1XBET Patch
+name: Simple Patch
 
 on:
   workflow_dispatch:
@@ -6,96 +6,55 @@ on:
     branches: [main]
 
 jobs:
-  patch:
+  build:
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
     steps:
-      - name: Checkout repo
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Java 17
+      - name: Setup Java
         uses: actions/setup-java@v4
         with:
-          distribution: 'temurin'
+          distribution: temurin
           java-version: '17'
 
-      - name: Download Apktool (v3.0.3 with fallback)
+      - name: Download Apktool (v2.11.1)
         run: |
-          APKTOOL_URL="https://github.com/iBotPeaches/Apktool/releases/download/v3.0.3/apktool_3.0.3.jar"
-          wget -q --show-progress "$APKTOOL_URL" -O apktool.jar || \
-          wget -q --show-progress "https://github.com/iBotPeaches/Apktool/releases/download/v2.9.3/apktool_2.9.3.jar" -O apktool.jar || \
-          wget -q --show-progress "https://github.com/iBotPeaches/Apktool/releases/download/v2.9.4/apktool_2.9.4.jar" -O apktool.jar || \
-          { echo "❌ All download URLs failed"; exit 1; }
-          
-          # ✅ FIXED: accept both Java and Zip archive
-          if ! file apktool.jar | grep -qE "Java archive|Zip archive"; then
-              echo "❌ Downloaded file is not a valid JAR"
-              file apktool.jar
-              exit 1
-          fi
-          
-          echo "✅ Download OK"
+          wget -q https://github.com/iBotPeaches/Apktool/releases/download/v2.11.1/apktool_2.11.1.jar -O apktool.jar
+          file apktool.jar
           java -jar apktool.jar --version
 
-      - name: Download smali/baksmali
-        run: |
-          wget -q https://github.com/baksmali/smali/releases/download/v3.0.5/smali-3.0.5.jar -O smali.jar || \
-          wget -q https://github.com/google/smali/releases/download/v3.0.5/smali-3.0.5.jar -O smali.jar
-          
-          wget -q https://github.com/baksmali/smali/releases/download/v3.0.5/baksmali-3.0.5.jar -O baksmali.jar || \
-          wget -q https://github.com/google/smali/releases/download/v3.0.5/baksmali-3.0.5.jar -O baksmali.jar
-          
-          file smali.jar
-          file baksmali.jar
-          java -jar smali.jar --version
-          java -jar baksmali.jar --version
-
-      - name: Decode APK (with splits)
+      - name: Decode APK
         run: |
           java -jar apktool.jar d base.apk -o base_decoded -f
-          
-          if [ ! -d "base_decoded/smali" ] && [ ! -d "base_decoded/smali_classes2" ]; then
-              echo "❌ Decode failed"
-              ls -la base_decoded/
-              exit 1
-          fi
-          echo "✅ Decode successful"
-          ls -la base_decoded/ | head
+          ls -la base_decoded/
 
-      - name: Run patch.py
+      - name: Patch and Rebuild
         run: |
           python3 patch.py
 
       - name: Zipalign
         run: |
           ZIPALIGN=$(find $ANDROID_HOME/build-tools -name zipalign | sort -V | tail -n 1)
-          echo "Using zipalign: $ZIPALIGN"
-          $ZIPALIGN -f -p 4 1xbet_patched.apk 1xbet_aligned.apk
+          $ZIPALIGN -f -p 4 1xbet_patched.apk shadow_aligned.apk
 
-      - name: Sign APK
+      - name: Sign
         run: |
-          if [ ! -f mod.keystore ]; then
-              keytool -genkeypair -v \
-                  -keystore mod.keystore \
-                  -alias modkey \
-                  -keyalg RSA -keysize 2048 -validity 10000 \
-                  -storepass modpass -keypass modpass \
-                  -dname "CN=Mod, OU=Mod, O=Mod, L=Mod, S=Mod, C=US"
-          fi
+          keytool -genkeypair -v -keystore mod.keystore -alias modkey \
+            -keyalg RSA -keysize 2048 -validity 10000 \
+            -storepass modpass -keypass modpass \
+            -dname "CN=Mod, O=Mod, C=US"
           
-          apksigner sign \
-              --ks mod.keystore \
-              --ks-pass pass:modpass \
-              --key-pass pass:modpass \
-              --out 1xbet_signed.apk \
-              1xbet_aligned.apk
+          APKSIGNER=$(find $ANDROID_HOME/build-tools -name apksigner | sort -V | tail -n 1)
+          $APKSIGNER sign --ks mod.keystore --ks-pass pass:modpass \
+            --key-pass pass:modpass --out shadow_signed.apk shadow_aligned.apk
           
-          apksigner verify --verbose 1xbet_signed.apk
+          $APKSIGNER verify --verbose shadow_signed.apk
 
-      - name: Upload APK artifact
+      - name: Upload
         uses: actions/upload-artifact@v4
         with:
-          name: 1xbet-modded
-          path: 1xbet_signed.apk
-          retention-days: 7
+          name: shadow-signed
+          path: shadow_signed.apk

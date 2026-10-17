@@ -1,7 +1,7 @@
 {
   "interaction": {
     "type": "script",
-    "path": "/data/data/org.xbet.client.ng_ps/files/frida_script.js",
+    "path": "frida_script.js",
     "on_change": "reload"
   },
   "runtime": {
