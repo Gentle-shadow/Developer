@@ -23,6 +23,12 @@ jobs:
         run: java -jar apktool.jar d base.apk -o base_decoded -f
       - name: Patch
         run: python3 patch.py
+      - name: Cleanup duplicate stamps
+        run: |
+          echo "Removing stamp-cert files that cause -c conflict..."
+          find base_decoded -name "stamp-cert*" -type f -delete 2>/dev/null || true
+          find base_decoded -name "stamp-cert*" -type f -print 2>/dev/null || echo "No stamps found — clean"
+
       - name: Rebuild with copy-original
         run: |
           echo "Trying -c flag (copy original resources)..."
