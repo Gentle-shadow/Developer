@@ -1,70 +1,100 @@
 name: In-Place 1XBET Patch
 
 on:
-  push:
-    branches: [ main, master ]
   workflow_dispatch:
-
-permissions:
-  contents: write
+  push:
+    branches: [main]
 
 jobs:
-  build:
+  patch:
     runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
+    timeout-minutes: 30
 
-      - uses: actions/setup-java@v4
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Java 17
+        uses: actions/setup-java@v4
         with:
           distribution: 'temurin'
           java-version: '17'
 
-      - name: Download tools
+      - name: Download Apktool (v3.0.3 with fallback)
         run: |
-          wget -q https://github.com/iBotPeaches/Apktool/releases/download/v2.9.3/apktool_2.9.3.jar -O apktool.jar
-          wget -q https://github.com/google/smali/releases/download/3.0.5/smali-3.0.5-fat.jar -O smali.jar
-          ls -la apktool.jar smali.jar
+          APKTOOL_URL="https://github.com/iBotPeaches/Apktool/releases/download/v3.0.3/apktool_3.0.3.jar"
+          wget -q --show-progress "$APKTOOL_URL" -O apktool.jar || \
+          wget -q --show-progress "https://github.com/iBotPeaches/Apktool/releases/download/v2.9.3/apktool_2.9.3.jar" -O apktool.jar || \
+          wget -q --show-progress "https://github.com/iBotPeaches/Apktool/releases/download/v2.9.4/apktool_2.9.4.jar" -O apktool.jar || \
+          { echo "❌ All download URLs failed"; exit 1; }
+          
+          if ! file apktool.jar | grep -q "Java archive"; then
+              echo "❌ Downloaded file is not a valid JAR"
+              file apktool.jar
+              exit 1
+          fi
+          java -jar apktool.jar --version
 
-      - name: Decompile base.apk
+      - name: Download smali/baksmali
         run: |
+          wget -q https://github.com/baksmali/smali/releases/download/v3.0.5/smali-3.0.5.jar -O smali.jar || \
+          wget -q https://github.com/google/smali/releases/download/v3.0.5/smali-3.0.5.jar -O smali.jar
+          
+          wget -q https://github.com/baksmali/smali/releases/download/v3.0.5/baksmali-3.0.5.jar -O baksmali.jar || \
+          wget -q https://github.com/google/smali/releases/download/v3.0.5/baksmali-3.0.5.jar -O baksmali.jar
+          
+          java -jar smali.jar --version
+          java -jar baksmali.jar --version
+
+      - name: Decode APK (with splits)
+        run: |
+          # Apktool v3 auto-detects split_config files in the same folder
           java -jar apktool.jar d base.apk -o base_decoded -f
-          echo "═══ DECODED ═══"
-          ls -la base_decoded/ | head -15
+          
+          if [ ! -d "base_decoded/smali" ] && [ ! -d "base_decoded/smali_classes2" ]; then
+              echo "❌ Decode failed"
+              ls -la base_decoded/
+              exit 1
+          fi
+          echo "✅ Decode successful"
+          ls -la base_decoded/ | head
 
-      - name: Apply in-place patch
-        run: python3 patch.py
+      - name: Run patch.py
+        run: |
+          python3 patch.py
+
+      - name: Zipalign
+        run: |
+          # GitHub runners have Android SDK pre-installed
+          ZIPALIGN=$(find $ANDROID_HOME/build-tools -name zipalign | sort -V | tail -n 1)
+          echo "Using zipalign: $ZIPALIGN"
+          $ZIPALIGN -f -p 4 1xbet_patched.apk 1xbet_aligned.apk
 
       - name: Sign APK
         run: |
-          BT=$(ls $ANDROID_HOME/build-tools/ | tail -1)
-          $ANDROID_HOME/build-tools/$BT/zipalign -v 4 1xbet_patched.apk 1xbet_aligned.apk
-          $ANDROID_HOME/build-tools/$BT/apksigner sign \
-            --ks keys/shadow.keystore \
-            --ks-key-alias shadow \
-            --ks-pass pass:shadow123 \
-            --key-pass pass:shadow123 \
-            --out 1xbet_signed.apk \
-            1xbet_aligned.apk
+          # Generate key if not present
+          if [ ! -f mod.keystore ]; then
+              keytool -genkeypair -v \
+                  -keystore mod.keystore \
+                  -alias modkey \
+                  -keyalg RSA -keysize 2048 -validity 10000 \
+                  -storepass modpass -keypass modpass \
+                  -dname "CN=Mod, OU=Mod, O=Mod, L=Mod, S=Mod, C=US"
+          fi
+          
+          # Sign
+          apksigner sign \
+              --ks mod.keystore \
+              --ks-pass pass:modpass \
+              --key-pass pass:modpass \
+              --out 1xbet_signed.apk \
+              1xbet_aligned.apk
+          
+          apksigner verify --verbose 1xbet_signed.apk
 
-      - name: Verify
-        run: |
-          BT=$(ls $ANDROID_HOME/build-tools/ | tail -1)
-          echo "═══ FILE ═══"
-          ls -la 1xbet_signed.apk
-          echo "═══ SIGNATURE ═══"
-          $ANDROID_HOME/build-tools/$BT/apksigner verify --print-certs 1xbet_signed.apk 2>&1 | head -5
-          echo "═══ CONTENTS ═══"
-          unzip -l 1xbet_signed.apk | grep -E "classes[0-9]*\.dex|libfrida|frida_script"
-          echo "═══ ZIP INTEGRITY ═══"
-          unzip -t 1xbet_signed.apk 2>&1 | tail -3
-
-      - name: Tag
-        id: t
-        run: echo "ts=$(date +'%Y%m%d-%H%M%S')" >> $GITHUB_OUTPUT
-
-      - uses: softprops/action-gh-release@v2
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
         with:
-          tag_name: inplace-${{ steps.t.outputs.ts }}
-          name: "1XBET In-Place ${{ steps.t.outputs.ts }}"
-          body: "In-place patch — smali.jar compiled, original resources preserved"
-          files: 1xbet_signed.apk
+          name: 1xbet-modded
+          path: 1xbet_signed.apk
+          retention-days: 7
