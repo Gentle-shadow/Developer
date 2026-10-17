@@ -1,4 +1,4 @@
-name: Build 1XBET with UAMT
+name: Clean 1XBET Build with copy-original
 
 on:
   push:
@@ -13,63 +13,38 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      
-      - name: Set up JDK 17
-        uses: actions/setup-java@v4
+      - uses: actions/setup-java@v4
         with:
           distribution: 'temurin'
           java-version: '17'
-          
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-          
-      - name: Install UAMT & Dependencies
-        run: |
-          pip install uamt
-          # UAMT needs these tools in path
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq zipalign apksigner
-          
-      - name: Merge Split APKs
+      - name: Download apktool
+        run: wget -q https://github.com/iBotPeaches/Apktool/releases/download/v2.9.3/apktool_2.9.3.jar -O apktool.jar
+      - name: Decompile
+        run: java -jar apktool.jar d base.apk -o base_decoded -f
+      - name: Patch
         run: python3 patch.py
-        
-      - name: Run UAMT Injection
+      - name: Rebuild with copy-original
         run: |
-          # UAMT is interactive, so we pipe the commands to it.
-          # The sequence: Select 'Inject Frida Gadget', enter APK path, 
-          # let it auto-detect, then confirm.
-          # (Note: UAMT's exact TUI keys may vary slightly, this is a scripted attempt)
-          printf "1\n1xbet_merged.apk\n\n\n\n\n" | uamt
-          
-          # Find the output (UAMT usually creates a *patched.apk file)
-          ls -la *.apk
-          
-      - name: Sign Final APK
+          echo "Trying -c flag (copy original resources)..."
+          java -jar apktool.jar b base_decoded -o 1xbet_clean_unsigned.apk -f -c
+      - name: Sign
         run: |
-          # UAMT *should* sign it, but if not, we do it manually here.
-          # Find the patched APK
-          PATCHED=$(ls *patched*.apk 2>/dev/null | head -1)
-          if [ -z "$PATCHED" ]; then PATCHED="1xbet_merged.apk"; fi
-          
           BT=$(ls $ANDROID_HOME/build-tools/ | tail -1)
-          $ANDROID_HOME/build-tools/$BT/zipalign -v 4 "$PATCHED" 1xbet_final_aligned.apk
+          $ANDROID_HOME/build-tools/$BT/zipalign -v 4 1xbet_clean_unsigned.apk 1xbet_clean_aligned.apk
           $ANDROID_HOME/build-tools/$BT/apksigner sign \
-            --ks keys/shadow.keystore \
-            --ks-key-alias shadow \
-            --ks-pass pass:shadow123 \
-            --key-pass pass:shadow123 \
-            --out 1xbet_final_signed.apk \
-            1xbet_final_aligned.apk
-            
-      - name: Get timestamp
+            --ks keys/shadow.keystore --ks-key-alias shadow \
+            --ks-pass pass:shadow123 --key-pass pass:shadow123 \
+            --out 1xbet_clean_signed.apk 1xbet_clean_aligned.apk
+      - name: Verify
+        run: |
+          BT=$(ls $ANDROID_HOME/build-tools/ | tail -1)
+          ls -la 1xbet_clean_signed.apk
+          $ANDROID_HOME/build-tools/$BT/apksigner verify --print-certs 1xbet_clean_signed.apk 2>&1 | head -5
+      - name: Tag
         id: t
         run: echo "ts=$(date +'%Y%m%d-%H%M%S')" >> $GITHUB_OUTPUT
-        
       - uses: softprops/action-gh-release@v2
         with:
-          tag_name: uamt-${{ steps.t.outputs.ts }}
-          name: "1XBET UAMT ${{ steps.t.outputs.ts }}"
-          body: "Built with UAMT (APKEditor engine). Testing install."
-          files: 1xbet_final_signed.apk
+          tag_name: copyc-${{ steps.t.outputs.ts }}
+          name: "1XBET -c Build ${{ steps.t.outputs.ts }}"
+          files: 1xbet_clean_signed.apk
