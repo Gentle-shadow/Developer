@@ -108,7 +108,7 @@ def patch_application_smali(smali_file):
     invoke-static {}, Lshadow/Loader;->shadowLoadFrida()V
 '''
     # Replace class name in the call with the actual class
-    actual_class_smali = smali_file.relative_to(DECODED).with_suffix('').as_posix().replace('/', '.')
+    actual_class_smali = smali_file.relative_to(DECODED).with_suffix('').as_posix()
     call_code = call_code.replace("Lshadow/Loader;", f"L{actual_class_smali};")
 
     content = content[:match2.end()] + call_code + content[match2.end():]
