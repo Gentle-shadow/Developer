@@ -11,29 +11,20 @@ jobs:
     timeout-minutes: 30
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Java
-        uses: actions/setup-java@v4
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
 
-      - name: Download Apktool (v2.11.1)
-        run: |
-          wget -q https://github.com/iBotPeaches/Apktool/releases/download/v2.11.1/apktool_2.11.1.jar -O apktool.jar
-          file apktool.jar
-          java -jar apktool.jar --version
+      - name: Download Apktool
+        run: wget -q https://github.com/iBotPeaches/Apktool/releases/download/v2.11.1/apktool_2.11.1.jar -O apktool.jar
 
-      - name: Decode APK
-        run: |
-          java -jar apktool.jar d base.apk -o base_decoded -f
-          ls -la base_decoded/
+      - name: Decode
+        run: java -jar apktool.jar d base.apk -o base_decoded -f
 
-      - name: Patch and Rebuild
-        run: |
-          python3 patch.py
+      - name: Patch
+        run: python3 patch.py
 
       - name: Zipalign
         run: |
@@ -42,19 +33,19 @@ jobs:
 
       - name: Sign
         run: |
+          # Create a temporary debug keystore if the one in keys/ isn't valid
           keytool -genkeypair -v -keystore mod.keystore -alias modkey \
             -keyalg RSA -keysize 2048 -validity 10000 \
             -storepass modpass -keypass modpass \
             -dname "CN=Mod, O=Mod, C=US"
-          
+            
           APKSIGNER=$(find $ANDROID_HOME/build-tools -name apksigner | sort -V | tail -n 1)
           $APKSIGNER sign --ks mod.keystore --ks-pass pass:modpass \
             --key-pass pass:modpass --out shadow_signed.apk shadow_aligned.apk
           
           $APKSIGNER verify --verbose shadow_signed.apk
 
-      - name: Upload
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
           name: shadow-signed
           path: shadow_signed.apk
